@@ -1,32 +1,42 @@
 // api/calendar.js
 // Fetches multiple ICS calendar feeds and merges them into one.
-// Events are anonymized — only shows "Busy" blocks, no details.
 //
 // Configure your source calendars in Vercel env vars:
-//   CALENDAR_URL_1, CALENDAR_URL_2, CALENDAR_URL_3
+//   CALENDAR_URL_1, CALENDAR_URL_2, CALENDAR_URL_3, ...
 //
-// Optional: set SECRET_TOKEN to require ?token=xxx in the URL
-// so only people you share the link with can access it.
+// Optional:
+//   SECRET_TOKEN  — require ?token=xxx in the URL for privacy
+//   SHOW_DETAILS  — set to "false" to anonymize events as "Busy" (default: show real titles)
+//   CAL_NAME      — calendar name shown in apps (default: "Merged Calendar")
 
-const KEEP_PROPS = new Set(['BEGIN', 'END', 'UID', 'DURATION', 'STATUS', 'TRANSP']);
+const ANONYMIZE = process.env.SHOW_DETAILS === 'false';
 
-function sanitizeEvent(vevent) {
+const ANON_KEEP = new Set(['BEGIN', 'END', 'UID', 'DURATION', 'STATUS', 'TRANSP']);
+const FULL_STRIP = new Set(['ORGANIZER', 'ATTENDEE', 'ATTACH', 'X-GOOGLE-CONFERENCE']);
+
+function processEvent(vevent) {
   // Unfold continuation lines (RFC 5545 §3.1)
   const unfolded = vevent.replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');
   const lines = unfolded.split(/\r?\n/).filter(Boolean);
   const out = [];
 
   for (const line of lines) {
-    // Property name is everything before the first : or ;
     const prop = line.split(/[:;]/)[0].toUpperCase();
-    if (KEEP_PROPS.has(prop) || prop === 'DTSTART' || prop === 'DTEND') {
-      out.push(line);
+    if (ANONYMIZE) {
+      if (ANON_KEEP.has(prop) || prop === 'DTSTART' || prop === 'DTEND') {
+        out.push(line);
+      }
+    } else {
+      if (!FULL_STRIP.has(prop)) {
+        out.push(line);
+      }
     }
   }
 
-  // Insert SUMMARY:Busy right after BEGIN:VEVENT
-  const beginIdx = out.findIndex(l => l === 'BEGIN:VEVENT');
-  if (beginIdx !== -1) out.splice(beginIdx + 1, 0, 'SUMMARY:Busy');
+  if (ANONYMIZE) {
+    const beginIdx = out.findIndex(l => l === 'BEGIN:VEVENT');
+    if (beginIdx !== -1) out.splice(beginIdx + 1, 0, 'SUMMARY:Busy');
+  }
 
   return out.join('\r\n');
 }
@@ -83,17 +93,19 @@ module.exports = async function handler(req, res) {
       }
     }
 
-    // Extract and sanitize VEVENT blocks
+    // Extract and process VEVENT blocks
     for (const m of ics.matchAll(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g)) {
-      events.push(sanitizeEvent(m[0]));
+      events.push(processEvent(m[0]));
     }
   }
+
+  const calName = process.env.CAL_NAME || 'Merged Calendar';
 
   const output = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
     'PRODID:-//calendar-merge//EN',
-    'X-WR-CALNAME:Availability',
+    `X-WR-CALNAME:${calName}`,
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     ...Array.from(timezones.values()),
@@ -102,7 +114,7 @@ module.exports = async function handler(req, res) {
   ].join('\r\n');
 
   res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
-  res.setHeader('Content-Disposition', 'inline; filename="availability.ics"');
+  res.setHeader('Content-Disposition', 'inline; filename="merged.ics"');
   res.setHeader('Cache-Control', 'public, max-age=300'); // Cache 5 minutes
   res.send(output);
 };
